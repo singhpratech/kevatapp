@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kevat — every byte reaches the far shore</title>
+<meta name="description" content="Kevat copies and moves large folders to external drives, survives unplugs and crashes, and resumes from the last proven checkpoint.">
+<link rel="icon" type="image/png" href="assets/icon-256.png">
+<meta property="og:title" content="Kevat — every byte reaches the far shore">
+<meta property="og:description" content="A fast, resumable file copier for external drives. Survives unplugs. Never loses your place.">
+<meta property="og:image" content="assets/hero.png">
+<meta property="og:type" content="website">
+<style>
+:root{
+  --ground:#EEF3F1; --surface:#FFF; --sunk:#E4EBE8; --line:#D2DEDA; --line-soft:#E2EAE7;
+  --ink:#16211F; --ink-2:#475854; --ink-3:#778783;
+  --teal:#2C7568; --teal-bright:#5BB8A8; --teal-wash:#E2F1ED;
+  --amber:#9A6612; --amber-bright:#D9A03C; --amber-wash:#FBF0DC;
+  --shadow:0 1px 2px rgba(22,33,31,.05), 0 20px 48px -20px rgba(22,33,31,.20);
+  --glow:.22;
+  /* three type roles: a serif display for character, DejaVu Sans for reading,
+     DejaVu Sans Mono for anything that must line up. */
+  --f-display:Georgia,"Iowan Old Style","Palatino Linotype",Palatino,"DejaVu Serif","Liberation Serif",serif;
+  --f-body:"DejaVu Sans","Bitstream Vera Sans",Verdana,system-ui,sans-serif;
+  --f-mono:"DejaVu Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --ground:#0D1615; --surface:#161F1D; --sunk:#101817; --line:#2A3735; --line-soft:#202B29;
+    --ink:#E8F0ED; --ink-2:#A3B4B0; --ink-3:#74857F;
+    --teal:#5BB8A8; --teal-bright:#5BB8A8; --teal-wash:#15302B;
+    --amber:#D9A03C; --amber-bright:#D9A03C; --amber-wash:#2C2312;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 26px 60px -22px rgba(0,0,0,.7);
+    --glow:.40;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0D1615; --surface:#161F1D; --sunk:#101817; --line:#2A3735; --line-soft:#202B29;
+  --ink:#E8F0ED; --ink-2:#A3B4B0; --ink-3:#74857F;
+  --teal:#5BB8A8; --teal-bright:#5BB8A8; --teal-wash:#15302B;
+  --amber:#D9A03C; --amber-bright:#D9A03C; --amber-wash:#2C2312;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 26px 60px -22px rgba(0,0,0,.7); --glow:.40;
+}
+:root[data-theme="light"]{
+  --ground:#EEF3F1; --surface:#FFF; --sunk:#E4EBE8; --line:#D2DEDA; --line-soft:#E2EAE7;
+  --ink:#16211F; --ink-2:#475854; --ink-3:#778783;
+  --teal:#2C7568; --teal-bright:#5BB8A8; --teal-wash:#E2F1ED;
+  --amber:#9A6612; --amber-bright:#D9A03C; --amber-wash:#FBF0DC;
+  --shadow:0 1px 2px rgba(22,33,31,.05), 0 20px 48px -20px rgba(22,33,31,.20); --glow:.22;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;background:var(--ground);color:var(--ink);font-family:var(--f-body);
+  font-size:16.5px;line-height:1.62;-webkit-font-smoothing:antialiased;overflow-x:hidden;
+}
+.wrap{max-width:1020px;margin:0 auto;padding:0 26px}
+.narrow{max-width:68ch}
+a{color:var(--teal)}
+a:focus-visible,button:focus-visible{outline:2px solid var(--teal-bright);outline-offset:2px;border-radius:3px}
+
+/* ── nav ─────────────────────────────────────────────── */
+nav{position:sticky;top:0;z-index:20;background:color-mix(in srgb,var(--ground) 86%,transparent);
+  backdrop-filter:blur(12px) saturate(1.4);border-bottom:1px solid var(--line-soft)}
+nav .wrap{display:flex;align-items:center;gap:18px;padding:11px 26px}
+.brand{display:flex;align-items:center;gap:10px;font-weight:700;letter-spacing:-.015em;
+  font-size:17.5px;text-decoration:none;color:var(--ink)}
+.brand img{width:26px;height:26px;border-radius:6px;display:block}
+nav .spacer{flex:1}
+nav a.lnk{color:var(--ink-2);text-decoration:none;font-size:14px;font-weight:600;letter-spacing:.005em}
+nav a.lnk:hover{color:var(--teal)}
+#theme{appearance:none;background:transparent;border:1px solid var(--line);border-radius:9px;
+  cursor:pointer;color:var(--ink-3);width:34px;height:34px;padding:0;flex:none;
+  display:grid;place-items:center;transition:color .18s,border-color .18s,transform .18s}
+#theme:hover{color:var(--teal);border-color:var(--teal-bright);transform:rotate(-12deg)}
+#theme .ico{width:17px;height:17px;display:none;fill:none;stroke:currentColor;
+  stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+#theme .ico-sun circle{fill:currentColor;stroke:none}
+#theme .ico-moon{fill:currentColor;stroke:none}
+/* the icon shows the CURRENT theme: sun by default on the light ground,
+   moon once the page is dark. */
+#theme .ico-sun{display:block}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]) #theme .ico-sun{display:none}
+  :root:not([data-theme="light"]) #theme .ico-moon{display:block}
+}
+:root[data-theme="dark"] #theme .ico-sun{display:none}
+:root[data-theme="dark"] #theme .ico-moon{display:block}
+:root[data-theme="light"] #theme .ico-sun{display:block}
+:root[data-theme="light"] #theme .ico-moon{display:none}
+
+/* ── shared display type ─────────────────────────────── */
+h1,h2,.promise p:first-child{font-family:var(--f-display);font-weight:400}
+.eyebrow,.kicker{font-family:var(--f-mono);font-size:11.5px;letter-spacing:.2em;
+  text-transform:uppercase;font-weight:700;color:var(--teal)}
+
+/* ── hero ────────────────────────────────────────────── */
+header.hero{padding:70px 0 8px;position:relative}
+h1{margin:16px 0 0;font-size:clamp(38px,7.2vw,72px);line-height:1.02;
+  letter-spacing:-.028em;max-width:19ch;text-wrap:balance}
+h1 em{font-style:italic;color:var(--teal)}
+.lede{margin:22px 0 0;font-size:clamp(17px,2.1vw,19.5px);color:var(--ink-2);
+  max-width:56ch;text-wrap:pretty}
+.cta{display:flex;flex-wrap:wrap;gap:11px;margin:34px 0 0}
+.btn{display:inline-block;text-decoration:none;font-weight:700;font-size:15px;padding:13px 22px;
+  border-radius:10px;border:1px solid var(--line);color:var(--ink);background:var(--surface);
+  transition:transform .15s ease,border-color .15s,box-shadow .15s}
+.btn:hover{border-color:var(--ink-3);transform:translateY(-1px)}
+.btn.pri{background:var(--teal);border-color:var(--teal);color:#fff;
+  box-shadow:0 6px 20px -8px color-mix(in srgb,var(--teal-bright) 70%,transparent)}
+:root[data-theme="dark"] .btn.pri{color:#0D1615}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]) .btn.pri{color:#0D1615}}
+.btn.pri:hover{filter:brightness(1.06)}
+
+/* the plate carries a teal glow, echoing the lit crates in the artwork */
+.plate-wrap{position:relative;margin:50px 0 0}
+.plate-wrap::before{
+  content:"";position:absolute;left:12%;right:12%;top:22%;bottom:-8%;border-radius:50%;
+  background:radial-gradient(ellipse at 68% 78%,var(--teal-bright),transparent 68%);
+  opacity:var(--glow);filter:blur(60px);z-index:0;pointer-events:none;
+}
+.plate{position:relative;z-index:1;border-radius:14px;overflow:hidden;
+  box-shadow:var(--shadow);border:1px solid var(--line-soft);line-height:0}
+.plate img{width:100%;height:auto;display:block}
+
+/* ── downloads ───────────────────────────────────────── */
+.dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(226px,1fr));gap:1px;
+  background:var(--line-soft);border:1px solid var(--line-soft);border-radius:13px;
+  overflow:hidden;margin:30px 0 0}
+.dl article{background:var(--surface);padding:22px 22px 24px;display:flex;
+  flex-direction:column;transition:background .18s}
+.dl article:hover{background:color-mix(in srgb,var(--teal-wash) 45%,var(--surface))}
+/* set by the detection script; without JS every card simply stays neutral */
+.dl article[data-mine]{background:var(--teal-wash)}
+.dl .mine{font-family:var(--f-mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;
+  font-weight:700;color:var(--teal);margin:0 0 7px;visibility:hidden}
+/* hidden, not removed: the row keeps its height so every card's heading aligns */
+.dl article[data-mine] .mine{visibility:visible}
+.dl .os{font-weight:700;font-size:18px;letter-spacing:-.014em}
+.dl .arch{font-family:var(--f-mono);font-size:10.5px;letter-spacing:.11em;text-transform:uppercase;
+  color:var(--ink-3);font-weight:700;margin:5px 0 0}
+.dl .note{font-size:13.5px;color:var(--ink-2);margin:10px 0 18px;line-height:1.5}
+.dl .btn{margin-top:auto;text-align:center;padding:11px 14px;font-size:14px}
+/* the global code chip has its own background — inside a filled button it reads as a blob */
+.dl .btn code{background:none;padding:0;color:inherit;font-size:.92em}
+/* the archive fallback under each installer button: present, quiet, never competing */
+/* The button sits above this line and the grid stretches every card to equal height, so
+   the buttons only align if this line is the same height in every card. macOS has a
+   one-line archive note where the others wrap to two; the min-height reserves the taller
+   case so all four Download buttons land on the same row. */
+.dl .alt{font-size:12.5px;color:var(--ink-3);margin:10px 0 0;text-align:center;line-height:1.5;min-height:3em}
+.dl .alt code{font-size:.95em}
+
+.after-dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));
+  gap:28px 34px;margin:34px 0 0;align-items:stretch}
+/* Each cell is a column, the paragraph absorbs the slack, and the code box is pinned to
+   the bottom — so within a row the boxes line up no matter how many lines the text runs,
+   and the next row's headings all start level. */
+.after-dl > div{display:flex;flex-direction:column}
+.after-dl h3{font-size:15px;margin:0 0 7px}
+.after-dl p{font-size:14px;margin:0 0 10px;flex:1 0 auto}
+/* wrap long commands rather than hiding them behind a horizontal scrollbar */
+.after-dl pre{margin:0 0 0;padding:13px 15px;white-space:pre-wrap;overflow-wrap:anywhere;margin-top:auto}
+.after-dl pre code{font-size:12.5px}
+
+.quick{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:20px 26px;margin:30px 0 0}
+.qh{font-family:var(--f-mono);font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--ink-3);font-weight:700;margin:0 0 8px}
+.quick pre{margin:0;padding:14px 58px 14px 16px;white-space:pre-wrap;overflow-wrap:anywhere;
+  position:relative}
+.quick pre code{font-size:13px}
+/* injected by script; absent entirely when the clipboard API is unavailable */
+.copy{position:absolute;top:9px;right:9px;font-family:var(--f-mono);font-size:10px;
+  letter-spacing:.1em;text-transform:uppercase;font-weight:700;cursor:pointer;
+  color:var(--ink-3);background:var(--surface);border:1px solid var(--line);
+  border-radius:6px;padding:5px 9px;transition:color .15s,border-color .15s}
+.copy:hover{color:var(--teal);border-color:var(--teal)}
+.copy[data-done]{color:var(--teal);border-color:var(--teal)}
+
+.dl-note{font-size:13.5px;color:var(--ink-3);margin:20px 0 0;max-width:72ch}
+
+/* Inline status qualifier. Most of this page describes a design; these mark the line
+   between what ships today and what is written down but not written yet. Quiet enough
+   to read as a footnote, present enough that no claim above it stands unqualified. */
+.qual{margin:18px 0 0;padding:11px 0 11px 15px;border-left:2px solid var(--amber-bright);
+  font-size:13.5px;color:var(--ink-2);max-width:72ch;line-height:1.56}
+.qual b{color:var(--ink);font-weight:700}
+
+/* GUI walkthrough */
+.shot{margin:30px 0 0}
+.shot .plate{line-height:0}
+.shot img{width:100%;height:auto;display:block}
+.shot figcaption{margin:12px 0 0;font-size:13.5px;color:var(--ink-3)}
+figure{margin:0}
+.readout{display:grid;grid-template-columns:repeat(auto-fit,minmax(228px,1fr));gap:1px;
+  background:var(--line-soft);border:1px solid var(--line-soft);border-radius:13px;
+  overflow:hidden;margin:28px 0 0}
+.readout > div{background:var(--surface);padding:18px 20px 20px}
+.readout h3{font-size:14px;margin:0 0 6px}
+.readout p{font-size:13.5px;margin:0;color:var(--ink-2);line-height:1.5}
+
+/* ── sections, divided by a waterline ────────────────── */
+section{padding:86px 0 0;position:relative}
+section+section::before{
+  content:"";position:absolute;top:0;left:0;right:0;height:1px;
+  background:linear-gradient(90deg,transparent,var(--line) 18%,var(--line) 82%,transparent);
+}
+h2{font-size:clamp(28px,3.9vw,42px);line-height:1.1;letter-spacing:-.024em;margin:12px 0 16px;text-wrap:balance}
+h3{font-size:19px;letter-spacing:-.012em;margin:0 0 8px;font-weight:700}
+section p{color:var(--ink-2);margin:0 0 15px}
+section p.narrow{max-width:68ch}
+.kicker{display:block;margin:0 0 4px}
+
+.grid{display:grid;gap:1px;background:var(--line-soft);border:1px solid var(--line-soft);
+  border-radius:13px;overflow:hidden;margin:30px 0 0}
+.g3{grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
+.grid > div{background:var(--surface);padding:24px 23px 26px;transition:background .18s}
+.grid > div:hover{background:color-mix(in srgb,var(--teal-wash) 45%,var(--surface))}
+.grid p{font-size:14.5px;margin:0}
+
+.feat{display:flex;flex-direction:column;gap:46px;margin:38px 0 0}
+.feat > article{display:grid;gap:7px}
+.feat h3{font-size:22px;font-family:var(--f-display);font-weight:400;letter-spacing:-.014em}
+.feat p{max-width:68ch}
+
+.tbl{overflow-x:auto;margin:28px 0 0;border:1px solid var(--line-soft);border-radius:13px;background:var(--surface)}
+table{width:100%;border-collapse:collapse;font-size:14.5px}
+th,td{text-align:left;padding:13px 17px;border-bottom:1px solid var(--line-soft)}
+tbody tr:last-child td{border-bottom:0}
+tbody tr{transition:background .16s}
+tbody tr:hover{background:var(--sunk)}
+th{font-family:var(--f-mono);font-size:10.5px;letter-spacing:.13em;text-transform:uppercase;
+  color:var(--ink-3);font-weight:700;background:var(--sunk)}
+td.n{font-family:var(--f-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+td .win{color:var(--teal);font-weight:700}
+
+.promise{margin:32px 0 0;padding:30px 32px;border-radius:13px;background:var(--teal-wash);
+  border:1px solid color-mix(in srgb,var(--teal-bright) 38%,var(--line));position:relative;overflow:hidden}
+.promise::after{content:"";position:absolute;right:-60px;bottom:-90px;width:280px;height:280px;
+  border-radius:50%;background:radial-gradient(circle,var(--teal-bright),transparent 70%);
+  opacity:.16;pointer-events:none}
+.promise p{margin:0;color:var(--ink);font-size:clamp(20px,2.7vw,27px);line-height:1.28;
+  max-width:44ch;letter-spacing:-.018em;position:relative}
+.promise .sub{margin:14px 0 0;font-size:15px;color:var(--ink-2);max-width:62ch;
+  font-family:var(--f-body);letter-spacing:0;line-height:1.6}
+
+code{font-family:var(--f-mono);font-size:.88em;background:var(--sunk);padding:2px 6px;border-radius:5px}
+pre{background:var(--sunk);border:1px solid var(--line-soft);border-radius:11px;padding:16px 18px;
+  overflow-x:auto;margin:22px 0 0}
+pre code{background:none;padding:0;font-size:13.5px}
+
+/* ── footer ──────────────────────────────────────────── */
+footer{margin:96px 0 0;border-top:1px solid var(--line);padding:30px 0 60px}
+footer .lore{color:var(--ink-3);font-size:14.5px;margin:0 0 26px;max-width:72ch}
+footer .lore strong{color:var(--ink-2)}
+footer .lore a{color:var(--teal);font-weight:700}
+.footbar{display:flex;align-items:center;gap:24px;flex-wrap:nowrap;
+  border-top:1px solid var(--line-soft);padding-top:20px}
+.fb-brand{display:flex;align-items:center;gap:9px;text-decoration:none;font-weight:700;
+  font-size:15px;color:var(--ink);letter-spacing:-.015em;flex:none}
+.fb-brand img{width:20px;height:20px;border-radius:5px;display:block}
+.fb-meta{flex:1 1 0;margin:0;min-width:0;font-family:var(--f-mono);font-size:12px;
+  color:var(--ink-3);letter-spacing:-.005em;line-height:1.5}
+.fb-meta strong{color:var(--ink-2);font-weight:700}
+.fb-links{display:flex;gap:19px;flex:none}
+.fb-links a{font-family:var(--f-mono);font-size:12px;color:var(--ink-3);text-decoration:none}
+.fb-links a:hover{color:var(--teal)}
+
+
+@media (max-width:760px){
+  header.hero{padding-top:44px}
+  section{padding-top:60px}
+  .status{flex-direction:column;gap:8px}
+  nav a.lnk[data-hide]{display:none}
+  .footbar{flex-wrap:wrap;gap:14px}
+  .fb-meta{flex-basis:100%;order:3}
+  .plate-wrap::before{display:none}
+}
+@media (prefers-reduced-motion:reduce){
+  html{scroll-behavior:auto}
+  *{transition:none !important}
+}
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="#top"><img src="assets/icon-256.png" alt="">Kevat</a>
+    <span class="spacer"></span>
+    <a class="lnk" href="#how" data-hide>How it works</a>
+    <a class="lnk" href="#platforms" data-hide>Platforms</a>
+    <a class="lnk" href="#download">Download</a>
+    <a class="lnk" href="https://github.com/singhpratech/kevatapp">GitHub</a>
+    <button id="theme" type="button" aria-label="Switch between light and dark theme" title="Switch theme">
+      <svg class="ico ico-moon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M20.5 14.9A8.5 8.5 0 1 1 9.1 3.5a7 7 0 0 0 11.4 11.4Z"/>
+      </svg>
+      <svg class="ico ico-sun" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <circle cx="12" cy="12" r="4.2"/>
+        <path d="M12 2.2v2.4M12 19.4v2.4M2.2 12h2.4M19.4 12h2.4M5.1 5.1l1.7 1.7M17.2 17.2l1.7 1.7M18.9 5.1l-1.7 1.7M6.8 17.2l-1.7 1.7"/>
+      </svg>
+    </button>
+  </div>
+</nav>
+
+<div class="wrap" id="top">
+
+<header class="hero">
+  <p class="eyebrow">Kevat · <span lang="hi">केवट</span></p>
+  <h1>Every byte reaches <em>the far shore.</em></h1>
+  <p class="lede">
+    Kevat copies and moves large folders — or a single big file — to external drives, survives being unplugged mid-transfer,
+    and picks up again from the last proven checkpoint. One small native binary. No network, ever.
+  </p>
+  <div class="cta">
+    <a class="btn pri" href="#download">Download for <span data-osname>your machine</span></a>
+    <a class="btn" href="#how">How it works</a>
+  </div>
+
+  <div class="plate-wrap"><div class="plate">
+    <img src="assets/hero.png" alt="A small ferry crossing dark water at night, carrying glowing crates of data toward the far shore" width="1376" height="768">
+  </div></div>
+
+</header>
+
+<section id="download">
+  <!-- The version span is filled by the same releases/latest fetch that resolves the
+       download buttons — never hardcoded, so it cannot go stale. Empty without JS. -->
+  <p class="kicker">Download <span id="latest-ver"></span></p>
+  <h2>The application. Pick your machine.</h2>
+  <p class="narrow">
+    Real installers, one per platform: an MSI that lands in the Start Menu, a DMG you drag to
+    Applications, an AppImage that is a single runnable file. Inside each is the same application,
+    about 5.5&nbsp;MB unpacked — run it plain and it opens a window, give it two paths and it stays
+    a command-line tool. No runtime to fetch, no service left running afterwards. Archives and a
+    terminal install script are below for those who prefer them.
+  </p>
+
+  <div class="dl">
+    <article data-os="linux" data-arch="x64">
+      <p class="mine">Your system</p>
+      <p class="os">Linux</p>
+      <p class="arch">x86_64 · AppImage</p>
+      <p class="note">One file, about 3.4&nbsp;MB: make it executable and run it. Needs FUSE — or
+      run it with <code>--appimage-extract-and-run</code> — and an X11 or Wayland desktop.</p>
+      <a class="btn pri" href="https://github.com/singhpratech/kevatapp/releases/latest" data-asset="x86_64-linux.AppImage">Download <code>.AppImage</code></a>
+      <p class="alt">Also as an archive:
+      <a href="https://github.com/singhpratech/kevatapp/releases/latest" data-asset="x86_64-linux.tar.gz"><code>.tar.gz</code></a>
+      · static CLI for servers below</p>
+    </article>
+
+    <article data-os="linux" data-arch="arm64">
+      <p class="mine">Your system</p>
+      <p class="os">Linux</p>
+      <p class="arch">ARM64 · AppImage</p>
+      <p class="note">The same single file, built for 64-bit ARM desktops. For a machine with no
+      desktop session, take the static command-line build below.</p>
+      <a class="btn pri" href="https://github.com/singhpratech/kevatapp/releases/latest" data-asset="aarch64-linux.AppImage">Download <code>.AppImage</code></a>
+      <p class="alt">Also as an archive:
+      <a href="https://github.com/singhpratech/kevatapp/releases/latest" data-asset="aarch64-linux.tar.gz"><code>.tar.gz</code></a>
+      · static CLI for servers below</p>
+    </article>
+
+    <article data-os="mac" data-arch="arm64">
+      <p class="mine">Your system</p>
+      <p class="os">macOS</p>
+      <p class="arch">Apple Silicon · DMG</p>
+      <p class="note">Open it and drag <code>Kevat.app</code> to Applications. Unsigned and not
+      notarized — Gatekeeper will object to the first launch; the two-line fix is below.
+      Honesty note: this DMG is assembled by CI and has never been executed by anyone.</p>
+      <a class="btn pri" href="https://github.com/singhpratech/kevatapp/releases/latest" data-asset="aarch64-macos.dmg">Download <code>.dmg</code></a>
+      <p class="alt">Also as an archive:
+      <a href="https://github.com/singhpratech/kevatapp/releases/latest" data-asset="aarch64-macos.tar.gz"><code>.tar.gz</code></a></p>
+    </article>
+
+    <article data-os="windows" data-arch="x64">
+      <p class="mine">Your system</p>
+      <p class="os">Windows</p>
+      <p class="arch">x86_64 · MSI installer</p>
+      <p class="note">Start Menu shortcut with no console flash, <code>kevat</code> on your PATH,
+      and a real uninstaller in Apps &amp; Features. Unsigned — SmartScreen will object once:
+      <strong>More info → Run anyway</strong>.
+      Honesty note: this MSI is assembled by CI and has never been executed by anyone.</p>
+      <a class="btn pri" href="https://github.com/singhpratech/kevatapp/releases/latest" data-asset="x86_64-windows.msi">Download <code>.msi</code></a>
+      <p class="alt">Also as an archive:
+      <a href="https://github.com/singhpratech/kevatapp/releases/latest" data-asset="x86_64-windows.zip"><code>.zip</code></a>
+      (two exes, no installer)</p>
+    </article>
+  </div>
+
+
+  <p class="dl-note">
+    <strong>Running a server or a container?</strong> There is a separate
+    command-line-only build for that: statically linked against musl, about 0.7&nbsp;MB, no glibc
+    version to satisfy, no desktop and no FUSE needed — one file that runs on any distribution.
+    Get it with <code>KEVAT_VARIANT=cli</code> on the install script, or directly:
+    <a href="https://github.com/singhpratech/kevatapp/releases/latest" data-asset="x86_64-linux-cli.tar.gz"><code>x86_64</code></a> ·
+    <a href="https://github.com/singhpratech/kevatapp/releases/latest" data-asset="aarch64-linux-cli.tar.gz"><code>ARM64</code></a>.
+  </p>
+
+  <div class="quick">
+    <div>
+      <p class="qh">Prefer the terminal? Linux &amp; macOS — bash, zsh, sh</p>
+      <pre><code>curl -fsSL https://kevat.app/install.sh | sh</code></pre>
+    </div>
+    <div>
+      <p class="qh">Windows — PowerShell</p>
+      <pre><code>irm https://kevat.app/install.ps1 | iex</code></pre>
+    </div>
+  </div>
+  <p class="dl-note">
+    Both scripts pick the archive build for your machine, check it against the release
+    <code>SHA256SUMS</code> before installing, and refuse to continue if it does not match — and
+    they wire up the same menu entry, <code>Kevat.app</code> or Start Menu shortcut the installers
+    create.
+  </p>
+
+  <div class="after-dl">
+    <div>
+      <h3>Check what you downloaded</h3>
+      <p>Every release ships a <code>SHA256SUMS</code> file covering every asset — installers
+      included. Compare before you trust it.</p>
+      <pre><code>sha256sum -c SHA256SUMS --ignore-missing</code></pre>
+    </div>
+    <div>
+      <h3>First run on Windows</h3>
+      <p>The MSI is unsigned, so SmartScreen interposes once. Click <strong>More info</strong>,
+      then <strong>Run anyway</strong> — after the checksum above, not instead of it.</p>
+      <pre><code>certutil -hashfile kevat-&lt;version&gt;-x86_64-windows.msi SHA256</code></pre>
+    </div>
+    <div>
+      <h3>First run on macOS</h3>
+      <p>Gatekeeper quarantines browser downloads. Right-click <code>Kevat.app</code> → Open — or,
+      on newer macOS where that path is gone, System Settings → Privacy &amp; Security →
+      <strong>Open Anyway</strong>, or clear the flag directly:</p>
+      <pre><code>xattr -dr com.apple.quarantine /Applications/Kevat.app</code></pre>
+    </div>
+    <div>
+      <h3>AppImage on Linux</h3>
+      <p>Browsers drop the execute bit, so restore it first. No FUSE on the machine? The second
+      form unpacks and runs without it.</p>
+      <pre><code>chmod +x kevat-*-x86_64-linux.AppImage
+./kevat-*-x86_64-linux.AppImage --appimage-extract-and-run</code></pre>
+    </div>
+    <div>
+      <h3>Build it yourself</h3>
+      <p>Needs a Rust toolchain. No C dependencies, so it compiles anywhere Rust runs.</p>
+      <pre><code>cargo install --git https://github.com/singhpratech/kevatapp</code></pre>
+    </div>
+    <div>
+      <h3>Then use it</h3>
+      <p>Copy a folder. Interrupt it however you like; the same command resumes it.</p>
+      <pre><code>kevat ~/Photos /media/backup/Photos</code></pre>
+    </div>
+  </div>
+</section>
+
+<section id="problem">
+  <p class="kicker">The problem</p>
+  <h2>Your drive is faster than your file manager.</h2>
+  <p class="narrow">
+    Copying a big folder to an external disk is worse than the hardware deserves, for three reasons
+    that have nothing to do with the drive.
+  </p>
+  <div class="grid g3">
+    <div>
+      <h3>Single-threaded, small buffers</h3>
+      <p>File managers copy one stream at a time, and Windows disables write caching on removable
+      drives. Everything crawls through the USB bridge.</p>
+    </div>
+    <div>
+      <h3>Small files pay a toll each</h3>
+      <p>Thousands of files mean thousands of open and close calls — and on Windows, a synchronous
+      malware scan per file. The drive idles while the queue drains.</p>
+    </div>
+    <div>
+      <h3>An interruption costs everything</h3>
+      <p>Three hours in, the cable catches. There is no record of what finished and no way to continue
+      a half-written 80 GB file. You start again.</p>
+    </div>
+  </div>
+</section>
+
+<section id="how">
+  <p class="kicker">How it works</p>
+  <h2>It writes down what it has proven, and never trusts it blind.</h2>
+
+  <div class="feat">
+    <article>
+      <h3>A journal kept off the drive</h3>
+      <p>Finished files, their hashes, and periodic checkpoints for the file in flight are recorded in
+      the system configuration directory — <strong>never on the destination drive</strong>. The only
+      thing Kevat leaves on your external disk is the file it is part-way through writing, named
+      <code>.kpart</code> until its bytes are proven and it is renamed into place.</p>
+      <p>On resume, a checkpoint is re-hashed against what is <em>actually on the disk</em> before a
+      single byte is reused, because a drive yanked mid-write corrupts the tail and a checkpoint by
+      itself proves nothing. Copying never modifies the original: the worst case after an interruption
+      is re-copying the file that was in flight, and nothing already written is lost.</p>
+    </article>
+
+    <article>
+      <h3>Verify, then move</h3>
+      <p>Every file is hashed with xxh3 as it is read. With <code>--verify</code> — on by default for
+      a move — the destination is read back and the two hashes compared before the file is accepted.
+      In move mode the original is deleted <strong>only</strong> after its copy is verified and that
+      fact is durable on disk, in that order, so a file is never in neither place.</p>
+      <p>Kevat refuses a move that would consume itself: a source and destination that resolve to the
+      same folder, through a symlink, a second mount point or any other alias, are turned away before
+      a byte moves.</p>
+    </article>
+
+    <article>
+      <h3>One reader, one writer, a bounded channel</h3>
+      <p>A reader thread streams and hashes the source; a writer thread lands it on the destination;
+      a bounded queue between them is the backpressure. It is the shape a rotational USB disk wants,
+      and it keeps memory flat no matter how large the files are.</p>
+    </article>
+  </div>
+</section>
+
+<section id="unplug">
+  <p class="kicker">The moment it exists for</p>
+  <h2>Pull the drive out. Nothing is lost.</h2>
+  <div class="promise">
+    <p>Everything already proven is already recorded.</p>
+    <p class="sub">
+      Pull the cable and the run ends — but nothing that finished is forgotten. Every completed file
+      and every 64 MB checkpoint is durable in the journal before the run stops, and the journal does
+      not live on the drive that just left. Reconnect, run the same command, and it continues from the
+      last checkpoint it can prove against the disk.
+    </p>
+  </div>
+  <p class="narrow" style="margin-top:26px">
+    Reconnect and run the same command; it continues from the last checkpoint. The test suite proves
+    this the hard way — it kills the process at random points, over and over, across a mixed tree of
+    thousands of small files and multi-gigabyte ones, resumes each time, and checks the result is
+    byte-for-byte identical to the source.
+  </p>
+</section>
+
+<section id="interface">
+  <p class="kicker">Using it</p>
+  <h2>Pick what to copy, and where. Then a button.</h2>
+  <p class="narrow">
+    One binary, two front ends: run it with no arguments and it opens a window, give it two paths and
+    it stays a command-line tool. Resume is automatic in both — never a flag you have to remember.
+  </p>
+
+  <figure class="shot">
+    <div class="plate">
+      <picture>
+        <source srcset="assets/gui-progress.png" media="(prefers-reduced-motion: reduce)">
+        <img src="assets/gui-walkthrough.gif" width="760" height="560" loading="lazy"
+             alt="The Kevat window: choosing a source folder, choosing a destination, then a progress
+                  screen showing 1.2 GiB of 1.9 GiB copied at 464 MiB/s, ending on a summary reading
+                  242 files written in 3.6 seconds.">
+      </picture>
+    </div>
+    <figcaption>
+      A real 1.9&nbsp;GB transfer of 242 files, recorded from the running application — not a mockup.
+    </figcaption>
+  </figure>
+
+  <div class="readout">
+    <div>
+      <h3>Choose a folder, a file, or several</h3>
+      <p>The source can be a whole folder, a single file, or any set of items you pick with
+      Ctrl-click and Shift-click; double-click opens a folder, as anywhere else. The destination is
+      the folder it all goes into. The picker is built into the window, not borrowed from the
+      desktop, so there is no portal layer between Kevat and the drive you picked. Nothing starts
+      until both are set.</p>
+    </div>
+    <div>
+      <h3>What it leaves alone</h3>
+      <p>Symbolic links are skipped and listed at the end. Modification times are kept;
+      permissions and ownership are not. Files already on the drive that are not in the source
+      are never deleted — and files that exist in both and differ are counted for you before
+      anything is replaced, so an overwrite is never a surprise.</p>
+    </div>
+    <div>
+      <h3>Watch it work</h3>
+      <p>Speed and total update ten times a second, in monospace so the digits do not jitter as they
+      change. The bar tracks bytes, not files, so a single large file still moves it.</p>
+    </div>
+    <div>
+      <h3>Stop whenever</h3>
+      <p>Stopping is the same event as an unplug, which is why it is safe. It finishes the file it is
+      on, leaves a clean journal, and the same two folders continue from there.</p>
+    </div>
+  </div>
+
+  <p class="narrow" style="margin-top:26px">
+    Chunk sizes and checksums are never mentioned in the window, because nobody copying holiday photos
+    should have to meet them. Two folders, a button, and a bar that moves.
+  </p>
+
+  <pre><code>kevat SRC DEST [--move] [--verify] [--no-verify] [--paranoid] [--dry-run]</code></pre>
+
+  <p class="narrow" style="margin-top:20px">
+    It renders entirely on the CPU — no OpenGL, no GPU driver — which is why one small binary carries
+    the whole interface. The application build is about 5.5&nbsp;MB; the command-line-only build is
+    0.7&nbsp;MB.
+  </p>
+</section>
+
+<section id="platforms">
+  <p class="kicker">Platforms</p>
+  <h2>Linux, macOS and Windows.</h2>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>Platform</th><th>Build</th></tr></thead>
+      <tbody>
+        <tr><td>Linux x86_64 · ARM64</td><td>application (window + CLI), plus a static musl CLI-only build</td></tr>
+        <tr><td>macOS Apple silicon</td><td>application (window + CLI)</td></tr>
+        <tr><td>Windows x86_64</td><td>application (window + CLI)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="narrow" style="margin-top:22px">
+    The application builds are dynamically linked and need a desktop session — glibc plus X11 or
+    Wayland on Linux. The static musl <code>-cli</code> build has no such requirement: no glibc
+    version to satisfy, no desktop, no FUSE — one file for servers and containers.
+  </p>
+  <p class="qual">
+    <b>Runs on Linux and Windows</b> — the application has been launched and used on both. The
+    macOS build is compiled and packaged by CI but has not been run by anyone, and neither has the
+    MSI or the DMG installer. The full kill-resume test suite is run on x86_64 Linux; the ARM
+    builds are published but have not been exercised yet. If a checksum matches and a binary
+    misbehaves, an issue on GitHub is welcome.
+  </p>
+  <p class="narrow">
+    <strong>Flatpak and Snap are excluded on purpose.</strong> Their sandboxes route the destination
+    through a portal that hides the volume and device details Kevat relies on — inside one, a USB
+    drive looks like a network mount and resume can no longer tie the journal to it.
+  </p>
+</section>
+
+<section id="privacy">
+  <p class="kicker">Privacy</p>
+  <h2>There is no network code in the binary.</h2>
+  <p class="narrow">
+    Not an update checker, not telemetry, not an HTTP client sitting unused — none of it is compiled
+    in. You can verify that by reading the source or by watching the traffic, which is the only kind
+    of privacy claim worth making. Updates come from your operating system's package manager, so you
+    decide when the code on your machine changes.
+  </p>
+  <p class="narrow">
+    Nothing is written to your destination drive except the files you asked for.
+  </p>
+</section>
+
+<footer>
+  <p class="lore">
+    <strong>Kevat</strong> (<span lang="hi">केवट</span>) is the ferryman who carried Rām
+    (<span lang="hi">राम</span>) across the river. He does not own the water and he does not hurry it —
+    he simply gets everything to the other side, and nothing is lost on the way. Sibling to
+    <a href="https://diskhoji.org">Diskhoji</a>, which finds what is eating your disk.
+  </p>
+
+  <div class="footbar">
+    <a class="fb-brand" href="#top"><img src="assets/icon-256.png" alt="">Kevat</a>
+    <p class="fb-meta">
+      kevat (<span lang="hi">केवट</span>) — ferryman · MIT license ·
+      created by <strong>Prateek Singh</strong> · safe crossing<!--
+        A baseline so a number is on screen at first paint instead of appearing a moment
+        later. The live figure from the GitHub API replaces it as soon as it arrives, and
+        since the counter only ever climbs, a stale baseline undercounts rather than lies.
+     --><span id="dlcount" data-baseline> · 5 downloads</span>
+    </p>
+    <nav class="fb-links" aria-label="Project links">
+      <a href="https://diskhoji.org">Diskhoji</a>
+      <a href="https://github.com/singhpratech/kevatapp">GitHub</a>
+      <a href="https://github.com/singhpratech/kevatapp/issues">Issues</a>
+      <a href="https://github.com/singhpratech/kevatapp/releases">Releases</a>
+    </nav>
+  </div>
+</footer>
+
+</div>
+
+<script>
+(function(){
+  var root = document.documentElement, btn = document.getElementById('theme');
+  var saved = null;
+  try { saved = localStorage.getItem('kevat-theme'); } catch(e){}
+  if (saved) root.setAttribute('data-theme', saved);
+  btn.addEventListener('click', function(){
+    var dark = root.getAttribute('data-theme') === 'dark'
+      || (!root.hasAttribute('data-theme') && matchMedia('(prefers-color-scheme: dark)').matches);
+    var next = dark ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    try { localStorage.setItem('kevat-theme', next); } catch(e){}
+  });
+})();
+
+// Highlight the build that matches the visitor's machine and float it to the front.
+// Progressive enhancement only: with JS off, all four cards stay visible and neutral,
+// so nothing is ever hidden behind detection.
+(function(){
+  var nav = navigator, uad = nav.userAgentData;
+  var hay = (((uad && uad.platform) || nav.platform || '') + ' ' + (nav.userAgent || '')).toLowerCase();
+
+  var os = null, arch = 'x64', label = null;
+  if (/android/.test(hay))        { return; }              // not a target — highlight nothing
+  else if (/win/.test(hay))       { os = 'windows'; label = 'Windows'; }
+  else if (/mac|iphone|ipad/.test(hay)) { os = 'mac'; arch = 'arm64'; label = 'macOS'; }
+  else if (/linux|cros|x11/.test(hay))  { os = 'linux'; label = 'Linux'; }
+  if (!os) return;
+  if (os === 'linux' && /aarch64|arm64|armv/.test(hay)) arch = 'arm64';
+
+  var card = document.querySelector('.dl article[data-os="' + os + '"][data-arch="' + arch + '"]');
+  if (!card) return;
+  card.setAttribute('data-mine', '');
+  card.parentNode.insertBefore(card, card.parentNode.firstChild);
+
+  var slot = document.querySelector('[data-osname]');
+  if (slot && label) slot.textContent = label;
+})();
+
+// Copy buttons on the install commands. Injected rather than written into the markup
+// so that a browser without the clipboard API simply never shows a button that
+// would not work.
+(function(){
+  if (!navigator.clipboard) return;
+  var blocks = document.querySelectorAll('.quick pre');
+  Array.prototype.forEach.call(blocks, function(pre){
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'copy';
+    btn.textContent = 'Copy';
+    btn.setAttribute('aria-label', 'Copy command to clipboard');
+    btn.addEventListener('click', function(){
+      var code = pre.querySelector('code');
+      function reset(){
+        setTimeout(function(){ btn.textContent = 'Copy'; btn.removeAttribute('data-done'); }, 1600);
+      }
+      navigator.clipboard.writeText(code.textContent.trim()).then(function(){
+        btn.textContent = 'Copied';
+        btn.setAttribute('data-done', '');
+        reset();
+      }, function(){
+        // Clipboard write can be refused — insecure context, denied permission, no
+        // user-gesture. Select the command instead so it is still one keystroke away
+        // rather than a button that silently does nothing.
+        var sel = window.getSelection(), range = document.createRange();
+        range.selectNodeContents(code);
+        sel.removeAllRanges();
+        sel.addRange(range);
+        btn.textContent = 'Press Ctrl+C';
+        reset();
+      });
+    });
+    pre.appendChild(btn);
+  });
+})();
+
+// Total release downloads, read from the public GitHub API. Cached for six hours so a
+// repeat visit costs no request, and silent on any failure — the footer simply stays as
+// it was. GitHub reports a cumulative counter per asset; there is no per-period figure
+// in the API, so this is an all-time total.
+(function(){
+  var el = document.getElementById('dlcount');
+  if (!el || !window.fetch) return;
+  var KEY = 'kevat-dl', TTL = 6 * 60 * 60 * 1000;
+
+  function show(n){
+    if (!(n > 0)) return;
+    el.textContent = ' · ' + n.toLocaleString() + ' downloads';
+    el.removeAttribute('data-baseline');
+    el.hidden = false;
+  }
+
+  try {
+    var hit = JSON.parse(localStorage.getItem(KEY) || 'null');
+    if (hit && (Date.now() - hit.at) < TTL) { show(hit.n); return; }
+  } catch(e){}
+
+  fetch('https://api.github.com/repos/singhpratech/kevatapp/releases')
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(rels){
+      if (!rels || !rels.length) return;
+      var n = 0;
+      rels.forEach(function(rel){
+        (rel.assets || []).forEach(function(a){
+          // SHA256SUMS is fetched by the install scripts on every run, so counting it
+          // would roughly double the figure. Count only the archives people install.
+          if (a.name !== 'SHA256SUMS') n += (a.download_count || 0);
+        });
+      });
+      try { localStorage.setItem(KEY, JSON.stringify({ n: n, at: Date.now() })); } catch(e){}
+      show(n);
+    })
+    .catch(function(){});
+})();
+
+// Upgrade the download buttons to direct links for the current versioned assets.
+// The static hrefs all point at the releases *page* — which always works, with or
+// without JS, rate-limited or not — and each carries a data-asset attribute naming
+// the file it wants (e.g. "x86_64-linux.AppImage"). When the API answers, the button
+// is upgraded to the one-click asset URL; when it doesn't, the page link stands.
+// Upgrade-not-repair: the failure mode is one extra click, never a 404.
+(function(){
+  var links = [].slice.call(document.querySelectorAll('a[data-asset]'));
+  if (!links.length || !window.fetch) return;
+  fetch('https://api.github.com/repos/singhpratech/kevatapp/releases/latest')
+    .then(function(r){ return r.ok ? r.json() : null; })
+    .then(function(rel){
+      if (rel && rel.tag_name) {
+        var v = document.getElementById('latest-ver');
+        if (v) v.textContent = '· ' + rel.tag_name;
+      }
+      var assets = (rel && rel.assets) || [];
+      links.forEach(function(a){
+        var want = '-' + a.getAttribute('data-asset');
+        var hit = assets.filter(function(x){
+          return x.name.slice(-want.length) === want;
+        })[0];
+        if (hit) { a.href = hit.browser_download_url; }
+      });
+    })
+    .catch(function(){});
+})();
+</script>
+</body>
+</html>

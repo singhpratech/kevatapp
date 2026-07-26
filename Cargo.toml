@@ -1,0 +1,91 @@
+[package]
+name = "kevat"
+version = "0.4.3"
+edition = "2021"
+rust-version = "1.77"
+description = "Fast, resumable copy/move to external drives — survives unplugs, resumes exactly."
+homepage = "https://kevat.app"
+repository = "https://github.com/singhpratech/kevatapp"
+license = "MIT"
+keywords = ["copy", "resume", "backup", "filesystem", "usb"]
+categories = ["filesystem", "command-line-utilities"]
+# The published crate is the program source only. Without this list, `cargo package`
+# sweeps in the website (docs/ — CNAME, GIFs, installers) and the release pipeline:
+# 2.2 MiB of things a crates.io consumer can't use and shouldn't get.
+include = [
+    "src/**",
+    "build.rs",
+    "assets/fonts/**",
+    "assets/icon/**",
+    "assets/icon.png",
+    "assets/kevat.desktop",
+    "README.md",
+    "LICENSE",
+]
+
+[features]
+default = []
+# The GUI is opt-in at compile time so the CLI build carries none of its weight.
+#   cargo build --release --features gui
+gui = ["dep:egui", "dep:egui-winit", "dep:winit", "dep:softbuffer", "dep:png"]
+# Windows only: link as a GUI-subsystem executable (shipped as kevatw.exe). A console-
+# subsystem exe flashes a console window when launched from Explorer or the Start Menu;
+# a GUI-subsystem exe has no usable stdout/stderr and breaks pipes and `&&` chains in
+# scripts. Neither subsystem serves both fronts, so the release ships both from one
+# source — the python/pythonw precedent. kevat.exe (console) is the CLI and the PATH
+# entry; kevatw.exe (this feature) is what shortcuts point at. On non-Windows targets
+# the attribute this enables is compiled out, so the feature is inert.
+windows-subsystem = ["gui"]
+
+[dependencies]
+# Streaming xxh3 over source plaintext; feeds journal hashes and the verify pass.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# ── GUI (feature "gui") ──────────────────────────────────────────────────────
+# egui core only — no eframe. eframe exists to bind egui to glow (OpenGL) or wgpu,
+# and this build deliberately links neither. We drive winit ourselves and paint into a softbuffer
+# framebuffer with the CPU rasterizer in src/gui/raster.rs, so the GUI build pulls
+# in no GL, no Mesa, no GPU driver on any platform.
+egui = { version = "0.29", optional = true }
+# The official winit glue: keyboard/mouse/IME translation and nothing else. Default
+# features off strips clipboard (arboard) and link-opening (webbrowser), neither of
+# which this UI uses, and both of which drag in dependencies for no benefit.
+egui-winit = { version = "0.29", optional = true, default-features = false, features = ["wayland", "x11"] }
+winit = { version = "0.30", optional = true }
+softbuffer = { version = "0.4", optional = true }
+# Decodes the bundled app icon for the window and the header mark. Pure Rust, so it
+# adds no C dependency to a build whose whole point is running anywhere.
+png = { version = "0.17", optional = true, default-features = false }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The Windows platform layer: drive enumeration (GetLogicalDrives/GetDriveTypeW), volume
+# labels, free/total space (GetDiskFreeSpaceExW), the USB bus-type query that catches
+# portable SSDs reporting DRIVE_FIXED, and the lock→dismount→eject ioctl sequence.
+# Raw declarations only — no runtime code, so the binary stays as small as before.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Power",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+] }
+
+# Embeds assets/icon/kevat.ico and the version block into the .exe, so Explorer, the
+# taskbar and Task Manager show the app icon instead of the generic executable one.
+# Target-gated: the Linux and macOS builds never compile it. Our Windows release is
+# built on a Windows runner (host == target), which is the case this crate supports.
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
