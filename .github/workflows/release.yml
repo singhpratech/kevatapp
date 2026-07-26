@@ -1,0 +1,476 @@
+name: release
+
+# Tag-driven. `git tag v0.1.0 && git push origin v0.1.0` builds every target and
+# publishes the release. Asset names carry no version, so the URLs under
+# /releases/latest/download/ stay valid forever and the website never needs editing.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The standing rule: never ship a release without the kill-resume suite green.
+  # This gate runs before a single artifact is built.
+  gate:
+    name: kill-resume suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Asset names come from the tag, but the MSI's ProductVersion, the DMG's
+      # Info.plist and the exe's VERSIONINFO all come from Cargo.toml. Nothing else
+      # links the two — an unbumped tag would ship a kevat-0.2.8-*.msi that internally
+      # says 0.2.7, which Windows then refuses to treat as an upgrade. Fail in seconds,
+      # not after the 12-minute suite.
+      - name: Tag must match Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          ver=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "${TAG#v}" != "$ver" ]; then
+            echo "tag $TAG does not match Cargo.toml version $ver" >&2
+            exit 1
+          fi
+      - name: Run the suite
+        run: ./tests/kill-resume.sh 8
+
+  build:
+    needs: gate
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two Linux flavours, deliberately:
+        #
+        #   gui — gnu targets, dynamically linked. winit loads the X11/Wayland client
+        #         libraries at runtime, which a static musl binary cannot do (measured:
+        #         a musl GUI build compiles but dies with "Failed to load one of xlib's
+        #         shared libraries"). So the application build links glibc and needs a
+        #         desktop session; that is what the installer puts in the app menu.
+        #   cli — musl targets, fully static. No GUI feature, no glibc floor, runs on
+        #         any distribution: headless servers, containers, Raspberry Pi.
+        #
+        # macOS and Windows have no such split — their windowing libraries ship with
+        # the OS, so one GUI-featured binary serves both fronts.
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            kind: gui
+            asset: kevat-x86_64-linux.tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            kind: gui
+            asset: kevat-aarch64-linux.tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            kind: cli
+            asset: kevat-x86_64-linux-cli.tar.gz
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            kind: cli
+            asset: kevat-aarch64-linux-cli.tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            kind: gui
+            asset: kevat-aarch64-macos.tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            kind: gui
+            asset: kevat-x86_64-windows.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install musl toolchain
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # winit dlopens X11/Wayland at runtime, but the dev packages keep the build
+      # self-sufficient if any transitive crate grows a link-time dependency.
+      - name: Install GUI build dependencies
+        if: runner.os == 'Linux' && matrix.kind == 'gui'
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libxkbcommon-dev libwayland-dev
+
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Build (CLI, static)
+        if: matrix.kind == 'cli'
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (GUI)
+        if: matrix.kind == 'gui' && runner.os != 'Windows'
+        run: cargo build --release --locked --target ${{ matrix.target }} --features gui
+
+      # Windows ships two exes from one source — the python/pythonw precedent.
+      #
+      #   kevat.exe  — console subsystem. The CLI: pipes, redirection, exit codes and
+      #                `kevat A B && ...` chains all behave, but launching it from
+      #                Explorer would flash a console window behind the GUI.
+      #   kevatw.exe — GUI subsystem (feature `windows-subsystem`). No console ever
+      #                appears; this is what the Start Menu shortcut points at. The
+      #                cost is that it has no usable stdout, so it is never the PATH
+      #                answer for scripts.
+      #
+      # The alternative — one GUI-subsystem exe that AttachConsole()s to its parent —
+      # was rejected: cmd and PowerShell do not wait for GUI-subsystem processes, so
+      # output prints over the next prompt and `&&` chains run before the copy ends.
+      # Two exes cost ~5 MB of zip and zero correctness.
+      - name: Build (GUI, Windows, both subsystems)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release --locked --target ${{ matrix.target }} --features windows-subsystem
+          Copy-Item target/${{ matrix.target }}/release/kevat.exe target/${{ matrix.target }}/release/kevatw.exe
+          cargo build --release --locked --target ${{ matrix.target }} --features gui
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        run: |
+          staged=$(mktemp -d)
+          cp target/${{ matrix.target }}/release/kevat "$staged/"
+          cp LICENSE README.md "$staged/"
+          # Desktop-integration payload for the Linux application build: install.sh
+          # turns these into the applications-menu entry and the hicolor icons, and a
+          # manual install can do the same by hand. The CLI archives stay lean.
+          if [ "${{ matrix.kind }}" = "gui" ] && [ "${{ runner.os }}" = "Linux" ]; then
+            mkdir "$staged/icons"
+            cp assets/icon/icon-16.png assets/icon/icon-32.png assets/icon/icon-48.png \
+               assets/icon/icon-64.png assets/icon/icon-128.png assets/icon/icon-256.png \
+               assets/icon/icon-512.png "$staged/icons/"
+            cp assets/kevat.desktop "$staged/"
+          fi
+          # macOS gets a real .icns, built here because iconutil exists on every
+          # macOS runner — install.sh then assembles Kevat.app from it with no
+          # tooling needed on the user's machine.
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            iconset=$(mktemp -d)/Kevat.iconset
+            mkdir -p "$iconset"
+            cp assets/icon/icon-16.png  "$iconset/icon_16x16.png"
+            cp assets/icon/icon-32.png  "$iconset/icon_16x16@2x.png"
+            cp assets/icon/icon-32.png  "$iconset/icon_32x32.png"
+            cp assets/icon/icon-64.png  "$iconset/icon_32x32@2x.png"
+            cp assets/icon/icon-128.png "$iconset/icon_128x128.png"
+            cp assets/icon/icon-256.png "$iconset/icon_128x128@2x.png"
+            cp assets/icon/icon-256.png "$iconset/icon_256x256.png"
+            cp assets/icon/icon-512.png "$iconset/icon_256x256@2x.png"
+            cp assets/icon/icon-512.png "$iconset/icon_512x512.png"
+            iconutil -c icns "$iconset" -o "$staged/kevat.icns"
+          fi
+          tar -czf ${{ matrix.asset }} -C "$staged" .
+          ls -lh ${{ matrix.asset }}
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $staged = New-Item -ItemType Directory -Path (Join-Path $env:RUNNER_TEMP 'staged')
+          Copy-Item target/${{ matrix.target }}/release/kevat.exe $staged
+          Copy-Item target/${{ matrix.target }}/release/kevatw.exe $staged
+          # The same icon that is embedded in the exes, as a file, so the installer's
+          # Start Menu shortcut can reference it without touching the binaries.
+          Copy-Item assets/icon/kevat.ico $staged
+          Copy-Item LICENSE, README.md $staged
+          Compress-Archive -Path (Join-Path $staged '*') -DestinationPath ${{ matrix.asset }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          retention-days: 1
+
+  # ── installers ───────────────────────────────────────────────────────────────
+  # The primary downloads: double-click and Kevat is in the Start Menu / app menu /
+  # Applications. Each installer repacks the artifact the build job already
+  # produced instead of compiling again, so the binary inside the .msi/.AppImage/
+  # .dmg is byte-identical to the one in the archive of the same tag — the two
+  # can never drift apart, and the gate job still blocks everything via `needs`.
+
+  msi:
+    needs: build
+    name: kevat-x86_64-windows.msi
+    runs-on: windows-latest
+    env:
+      # wix 4.x is a .NET 6 tool; runner images rotate runtimes without notice,
+      # and roll-forward lets the pinned tool run on whatever newer runtime the
+      # image ships instead of dying with "You must install .NET".
+      DOTNET_ROLL_FORWARD: Major
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kevat-x86_64-windows.zip
+
+      - name: Unpack the built exes
+        shell: pwsh
+        run: Expand-Archive -Path kevat-x86_64-windows.zip -DestinationPath payload
+
+      # A pinned dotnet tool, not the runner's preinstalled WiX 3: preinstalled
+      # software appears and disappears as windows-latest rotates images, while a
+      # pinned tool version cannot change underneath us.
+      - name: Install WiX
+        shell: pwsh
+        run: dotnet tool install --global wix --version 4.0.5
+
+      - name: Build the MSI
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path Cargo.toml -Pattern '^version = "([^"]+)"').Matches[0].Groups[1].Value
+          if (-not $ver) { throw 'could not read the version from Cargo.toml' }
+          wix build packaging/windows/kevat.wxs `
+            -arch x64 `
+            -d Version=$ver `
+            -d PayloadDir=payload `
+            -d IconFile=assets/icon/kevat.ico `
+            -o kevat-x86_64-windows.msi
+          # ICE validation is the only scrutiny this MSI gets before a user
+          # double-clicks it — nobody on the project has run it on real Windows.
+          wix msi validate kevat-x86_64-windows.msi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kevat-x86_64-windows.msi
+          path: kevat-x86_64-windows.msi
+          retention-days: 1
+
+  appimage:
+    needs: build
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # appimagetool and the embedded type2 runtime are pinned by release tag
+        # AND sha256. Those release assets are immutable, so a mismatch means a
+        # corrupted or substituted download — stop, never package it.
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            source: kevat-x86_64-linux.tar.gz
+            asset: kevat-x86_64-linux.AppImage
+            tool_sha256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+            runtime_sha256: 2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            source: kevat-aarch64-linux.tar.gz
+            asset: kevat-aarch64-linux.AppImage
+            tool_sha256: f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158
+            runtime_sha256: 00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.source }}
+
+      - name: Assemble the AppDir
+        run: |
+          payload=$(mktemp -d)
+          tar -xzf ${{ matrix.source }} -C "$payload"
+          mkdir -p AppDir/usr/bin
+          install -m 755 "$payload/kevat" AppDir/usr/bin/kevat
+          # appimagetool requires the desktop entry and its icon at the AppDir
+          # root. The checked-in template already says Exec=kevat and Icon=kevat,
+          # which is exactly how the binary and icon are staged here.
+          cp assets/kevat.desktop AppDir/kevat.desktop
+          cp assets/icon/icon-256.png AppDir/kevat.png
+          ln -s usr/bin/kevat AppDir/AppRun
+
+      - name: Build the AppImage
+        env:
+          TOOL_SHA256: ${{ matrix.tool_sha256 }}
+          RUNTIME_SHA256: ${{ matrix.runtime_sha256 }}
+        run: |
+          curl -fsSL -o appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-${{ matrix.arch }}.AppImage"
+          curl -fsSL -o runtime \
+            "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-${{ matrix.arch }}"
+          echo "$TOOL_SHA256  appimagetool" | sha256sum -c -
+          echo "$RUNTIME_SHA256  runtime" | sha256sum -c -
+          chmod +x appimagetool
+          # --appimage-extract-and-run because CI runners have no FUSE, so the
+          # tool unpacks itself instead of mounting. --runtime-file pins the
+          # runtime embedded in OUR AppImage; left out, appimagetool downloads
+          # an unpinned "continuous" build at package time.
+          ARCH=${{ matrix.arch }} ./appimagetool --appimage-extract-and-run \
+            --runtime-file runtime AppDir ${{ matrix.asset }}
+          # The zip layer of artifact upload/download and the browser download
+          # both drop the execute bit anyway — the website tells users to
+          # chmod +x — but keep the file honest where permissions do survive.
+          chmod +x ${{ matrix.asset }}
+          ls -lh ${{ matrix.asset }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          retention-days: 1
+
+  dmg:
+    needs: build
+    name: kevat-aarch64-macos.dmg
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kevat-aarch64-macos.tar.gz
+
+      - name: Assemble Kevat.app and wrap it in a DMG
+        run: |
+          ver=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          [ -n "$ver" ] || { echo "could not read the version from Cargo.toml" >&2; exit 1; }
+          payload=$(mktemp -d)
+          tar -xzf kevat-aarch64-macos.tar.gz -C "$payload"
+
+          # The same bundle install.sh assembles on the user's machine, built
+          # once here instead. The binary inside is already ad-hoc signed by the
+          # linker (arm64 refuses to run otherwise); the bundle is unsigned and
+          # not notarized, and the website documents the Gatekeeper steps
+          # rather than pretending otherwise.
+          app="dmgroot/Kevat.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          install -m 755 "$payload/kevat" "$app/Contents/MacOS/kevat"
+          cp "$payload/kevat.icns" "$app/Contents/Resources/kevat.icns"
+          cat > "$app/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleIdentifier</key>
+            <string>app.kevat.kevat</string>
+            <key>CFBundleName</key>
+            <string>Kevat</string>
+            <key>CFBundleDisplayName</key>
+            <string>Kevat</string>
+            <key>CFBundleExecutable</key>
+            <string>kevat</string>
+            <key>CFBundleIconFile</key>
+            <string>kevat</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleShortVersionString</key>
+            <string>$ver</string>
+            <key>CFBundleVersion</key>
+            <string>$ver</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+            <key>LSApplicationCategoryType</key>
+            <string>public.app-category.utilities</string>
+          </dict>
+          </plist>
+          PLIST
+
+          # The /Applications symlink is what makes the DMG an installer: open
+          # it and the drag-across gesture is right there.
+          ln -s /Applications dmgroot/Applications
+          # UDZO: compressed, read-only — the classic drag-to-install image.
+          hdiutil create -volname Kevat -srcfolder dmgroot -format UDZO -ov kevat-aarch64-macos.dmg
+          hdiutil verify kevat-aarch64-macos.dmg
+          ls -lh kevat-aarch64-macos.dmg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kevat-aarch64-macos.dmg
+          path: kevat-aarch64-macos.dmg
+          retention-days: 1
+
+  publish:
+    needs: [build, msi, appimage, dmg]
+    name: publish release
+    runs-on: ubuntu-latest
+    # workflow_dispatch runs from a branch, where github.ref_name is the branch name.
+    # Without this, a manual run would publish a release tagged "main" — and since it
+    # would be the newest, /releases/latest/download/ would start serving branch-HEAD
+    # builds to every `curl | sh` on the website.
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: staged
+          merge-multiple: true
+
+      # Put the version in every filename, so a downloaded kevat-0.2.6-x86_64-windows.msi
+      # says what it is on disk. Done here, at the last step, so the build/installer jobs
+      # keep stable internal artifact names. The website and install scripts resolve the
+      # current version from the GitHub API rather than hard-coding it, so their links
+      # never go stale. TAG via env, never interpolated into the script (injection).
+      - name: Version the asset names
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          ver="${TAG#v}"
+          cd staged
+          for f in kevat-*; do
+            mv "$f" "kevat-${ver}-${f#kevat-}"
+          done
+          ls -1
+
+      - name: Checksums
+        run: |
+          cd staged
+          sha256sum * > SHA256SUMS
+          cat SHA256SUMS
+
+      # `gh` is preinstalled and authenticates with GITHUB_TOKEN — no third-party
+      # release action, so the pipeline adds no supply-chain surface.
+      # ${{ }} is substituted textually before bash parses the line, so interpolating a
+      # tag name directly into the script is a command-injection hole: git accepts a tag
+      # like  v1";id;"  which matches the v* trigger and would run as a command here,
+      # with a contents:write token in the environment. Passed through env: instead, so
+      # the value only ever reaches bash as data.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Idempotent. This repo keeps a single amended commit, so a tag is routinely
+          # deleted and re-pushed at the same name; `gh release create` then fails with
+          # "a release with the same tag name already exists" and the rebuilt artifacts
+          # never land. Re-uploading over the existing release is the intended outcome.
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            echo "release $TAG exists — replacing its assets"
+            gh release upload "$TAG" staged/* --repo "$REPO" --clobber
+            # Deleting a tag to re-push it turns its release into a draft, and clobbering
+            # assets does not undo that — a drafted release makes /releases/latest/download
+            # 404 for everyone. Force it back to published so a re-tag can never strand it.
+            gh release edit "$TAG" --repo "$REPO" --draft=false --latest
+            exit 0
+          fi
+          gh release create "$TAG" staged/* \
+            --repo "$REPO" \
+            --title "Kevat $TAG" \
+            --notes "The application: copy, move, resume, verify — window or command line.
+
+          **Installers** — the easiest way in:
+          \`kevat-x86_64-windows.msi\` (Start Menu, PATH, a real uninstaller),
+          \`kevat-aarch64-macos.dmg\` (drag Kevat.app to Applications), and
+          \`kevat-*-linux.AppImage\` (\`chmod +x\`, then run; needs FUSE, or run it
+          with \`--appimage-extract-and-run\`). The MSI and DMG are built in CI and
+          have not been executed by anyone yet.
+
+          The plain \`kevat-*-linux\`, \`-macos\` and \`-windows\` archives are the
+          same graphical application (which is also the full CLI). The \`-linux-cli\`
+          archives are static musl builds with no GUI at all, for headless servers,
+          containers and the Raspberry Pi — those run on any distribution.
+
+          Verify a download against \`SHA256SUMS\`:
+
+          \`\`\`
+          sha256sum -c SHA256SUMS --ignore-missing
+          \`\`\`
+
+          The macOS and Windows builds are unsigned — SmartScreen wants
+          More info → Run anyway, Gatekeeper wants right-click → Open or
+          \`xattr -dr com.apple.quarantine /Applications/Kevat.app\`. The website
+          shows the same steps."

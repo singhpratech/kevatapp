@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Kevat MSI authoring (WiX v4 schema, built with the pinned `wix` dotnet tool in
+  .github/workflows/release.yml). Preprocessor variables are supplied on the
+  command line so this file never carries a version of its own:
+
+    wix build packaging/windows/kevat.wxs -arch x64
+        -d Version=<from Cargo.toml> -d PayloadDir=<unpacked zip> -d IconFile=assets/icon/kevat.ico
+        -o kevat-x86_64-windows.msi
+
+  The exes come from the unpacked release zip, not from a fresh build, so the
+  MSI's contents are byte-identical to the archive of the same tag.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+
+  <!--
+    UpgradeCode is the MSI's permanent identity: Windows uses it to recognise a
+    later Kevat MSI as an upgrade of this one instead of a second product side
+    by side. It must NEVER change across releases — the Version is what moves.
+  -->
+  <Package Name="Kevat"
+           Manufacturer="Kevat Project"
+           Version="$(var.Version)"
+           UpgradeCode="3A9D8E4C-0587-4367-BA24-A498218BEF67"
+           Language="1033"
+           Scope="perMachine"
+           Compressed="yes">
+
+    <SummaryInformation Description="Kevat — fast, resumable copy/move to external drives" />
+
+    <!-- Replace older versions in place; refuse to silently downgrade. -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Kevat is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- The mark shown in Apps &amp; Features and on the Start Menu shortcut. -->
+    <Icon Id="KevatIcon" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="KevatIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://kevat.app" />
+    <Property Id="ARPHELPLINK" Value="https://kevat.app" />
+    <!-- Nothing to modify — the product has no optional features. -->
+    <Property Id="ARPNOMODIFY" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Kevat">
+
+        <!--
+          kevat.exe is the console-subsystem CLI and the PATH answer; the
+          Environment row rides in its component so the PATH entry appears and
+          disappears exactly with the binary it points at. System="yes" writes
+          the machine PATH — this is a per-machine install — and Permanent="no"
+          makes the uninstaller remove it again.
+        -->
+        <Component Id="KevatExe">
+          <File Id="KevatExe" Source="$(var.PayloadDir)\kevat.exe" KeyPath="yes" />
+          <Environment Id="KevatPath" Name="PATH" Value="[INSTALLFOLDER]"
+                       Part="last" Action="set" Permanent="no" System="yes" />
+        </Component>
+
+        <!-- kevatw.exe: same program, GUI subsystem — what the shortcut launches
+             so no console window flashes behind it. -->
+        <Component Id="KevatwExe">
+          <File Id="KevatwExe" Source="$(var.PayloadDir)\kevatw.exe" KeyPath="yes" />
+        </Component>
+
+        <!-- The icon as a loose file too, matching the zip layout, so anything
+             pointing at kevat.ico beside the exes keeps working. -->
+        <Component Id="KevatIco">
+          <File Id="KevatIcoFile" Source="$(var.IconFile)" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <!--
+      Start Menu shortcut, directly in Programs (no vendor subfolder — one
+      shortcut does not earn a folder). Non-advertised shortcuts cannot be a
+      component's keypath, so the keypath is the registry crumb below — the
+      pattern Windows Installer validation (ICE43) demands.
+    -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Component Id="StartMenuShortcut" Guid="1DC2C570-4881-42FB-A9D6-B63795C56E45">
+        <Shortcut Id="KevatStartMenuShortcut"
+                  Name="Kevat"
+                  Description="Copy and move large folders to external drives — survives unplugs and resumes"
+                  Target="[INSTALLFOLDER]kevatw.exe"
+                  WorkingDirectory="INSTALLFOLDER"
+                  Icon="KevatIcon" />
+        <RegistryValue Root="HKCU" Key="Software\Kevat" Name="StartMenuShortcut"
+                       Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <!--
+      Every Component must hang off a Feature or WiX refuses to link the package
+      ("orphaned Component"). Kevat has no optional parts, so there is exactly one
+      Feature at Level 1 — always installed, never presented as a choice, which is
+      why ARPNOMODIFY is set above.
+    -->
+    <Feature Id="Main" Title="Kevat" Level="1">
+      <ComponentRef Id="KevatExe" />
+      <ComponentRef Id="KevatwExe" />
+      <ComponentRef Id="KevatIco" />
+      <ComponentRef Id="StartMenuShortcut" />
+    </Feature>
+
+  </Package>
+</Wix>

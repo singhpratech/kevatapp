@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Kevat
+GenericName=File Copier
+Comment=Copy and move large folders to external drives — survives unplugs and resumes
+# PATH-relative on purpose: this is the template shipped in the archive for manual
+# installs. install.sh writes its own copy with the absolute path it installed to.
+Exec=kevat
+Icon=kevat
+Terminal=false
+Categories=Utility;FileTools;
+Keywords=copy;move;backup;transfer;usb;drive;resume;external;
+# Matches the window's WM_CLASS, so the running window binds to this launcher icon
+# instead of appearing as a second, unnamed entry in the taskbar.
+StartupWMClass=kevat
